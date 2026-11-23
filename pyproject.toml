@@ -1,0 +1,61 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "websocket-scanner"
+dynamic = ["version"]
+description = "Find local WebSocket servers and print or log the text in their messages."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "KonyAHS" }]
+requires-python = ">=3.10"
+dependencies = ["websockets>=15,<18"]
+keywords = ["websocket", "scanner", "listener", "debugging", "tkinter"]
+classifiers = [
+    "Development Status :: 5 - Production/Stable",
+    "Environment :: Console",
+    "Environment :: Win32 (MS Windows)",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Topic :: Internet",
+    "Topic :: Software Development :: Debuggers",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8", "ruff>=0.6"]
+
+[project.urls]
+Homepage = "https://github.com/KonyAHS/Websocket-Scanner"
+Issues = "https://github.com/KonyAHS/Websocket-Scanner/issues"
+Releases = "https://github.com/KonyAHS/Websocket-Scanner/releases"
+
+[project.scripts]
+ws-scanner = "ws_listener:main"
+
+[project.gui-scripts]
+ws-scanner-gui = "ws_listener:gui_main"
+
+[tool.hatch.version]
+path = "ws_listener.py"
+
+[tool.hatch.build.targets.wheel]
+only-include = ["ws_listener.py"]
+
+[tool.hatch.build.targets.sdist]
+include = ["ws_listener.py", "test_ws_listener.py", "assets/", "examples/", "README.md", "LICENSE", "CHANGELOG.md"]
+
+[tool.pytest.ini_options]
+testpaths = ["."]
+python_files = ["test_*.py"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "UP", "B"]
+ignore = ["E501", "E731"]  # line length is left to the formatter

@@ -1,0 +1,85 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing tag to (re)build, e.g. v1.0.0
+        required: true
+
+permissions:
+  contents: write
+
+env:
+  TAG: ${{ inputs.tag || github.ref_name }}
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+      - name: Install
+        run: pip install -e ".[dev]" pyinstaller build
+      - name: Test
+        run: pytest -q
+      - name: Check tag matches version
+        shell: bash
+        run: |
+          version=$(ws-scanner --version | awk '{print $2}')
+          [ "v$version" = "$TAG" ] || { echo "Tag $TAG != version $version"; exit 1; }
+      - name: Build Python packages
+        run: python -m build
+      - name: Build Windows executable
+        run: >-
+          pyinstaller --noconfirm --clean --onefile --windowed
+          --name WebSocketScanner
+          --icon assets/icon.ico
+          --add-data "assets/icon.png;assets"
+          ws_listener.py
+      - name: Package
+        shell: pwsh
+        run: |
+          $name = "WebSocketScanner-$env:TAG-windows-x64"
+          New-Item -ItemType Directory release | Out-Null
+          Copy-Item dist/WebSocketScanner.exe "release/$name.exe"
+          Copy-Item dist/*.whl, dist/*.tar.gz release/
+          Get-FileHash release/* -Algorithm SHA256 |
+            ForEach-Object { "$($_.Hash.ToLower())  $(Split-Path $_.Path -Leaf)" } |
+            Set-Content release/SHA256SUMS.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release
+          path: release/*
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - uses: actions/download-artifact@v4
+        with:
+          name: release
+          path: release
+      - name: Extract release notes
+        run: |
+          version="${TAG#v}"
+          awk -v v="$version" '/^## /{p = index($0, "[" v "]") > 0; next} p' CHANGELOG.md > notes.md
+          [ -s notes.md ] || echo "See CHANGELOG.md" > notes.md
+      - name: Create or update GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if gh release view "$TAG" >/dev/null 2>&1; then
+            gh release upload "$TAG" release/* --clobber
+          else
+            gh release create "$TAG" release/* --title "WebSocket Scanner $TAG" --notes-file notes.md
+          fi
