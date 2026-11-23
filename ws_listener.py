@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Listen to a WebSocket and print or log useful text from its messages.
+"""WebSocket Scanner: find local WebSockets, then print or log text from their messages.
 
-Install the optional dependency first:
+Install the dependency first:
 
-    python -m pip install -r requirements-ws-listener.txt
+    python -m pip install -r requirements.txt
 
-Run ``python ws_listener.py --help`` for all options.
+Run ``python ws_listener.py --help`` for all options, or ``--gui`` for the window.
 """
 
 from __future__ import annotations
@@ -24,14 +24,17 @@ import ssl
 import subprocess
 import sys
 import threading
+from collections.abc import Callable, Iterable, Sequence
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from queue import Empty, Queue
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Callable, Iterable, Sequence
+from queue import Empty, Queue
+from typing import Any
 
+__version__ = "1.0.0"
 
+APP_NAME = "WebSocket Scanner"
 DEFAULT_URL = "ws://127.0.0.1:6677"
 DEFAULT_TEXT_KEYS = (
     "text",
@@ -59,7 +62,15 @@ class SocketCandidate:
     @property
     def search_text(self) -> str:
         return " ".join(
-            (self.kind, self.local, self.remote, self.state, self.process, str(self.pid or ""), self.url)
+            (
+                self.kind,
+                self.local,
+                self.remote,
+                self.state,
+                self.process,
+                str(self.pid or ""),
+                self.url,
+            )
         ).casefold()
 
 
@@ -251,11 +262,7 @@ def discover_sockets() -> list[SocketCandidate]:
         host, port = split_endpoint(item.local)
         if port is not None:
             normalized_host = (
-                "127.0.0.1"
-                if host in {"0.0.0.0", "*"}
-                else "::1"
-                if host == "::"
-                else host
+                "127.0.0.1" if host in {"0.0.0.0", "*"} else "::1" if host == "::" else host
             )
             probe_targets.setdefault((normalized_host, port), item)
 
@@ -294,7 +301,9 @@ def discover_sockets() -> list[SocketCandidate]:
             )
         results.append(item)
     priority = {"WebSocket": 0, "Listening": 1, "Active": 2}
-    return sorted(results, key=lambda item: (priority[item.kind], item.process.casefold(), item.local))
+    return sorted(
+        results, key=lambda item: (priority[item.kind], item.process.casefold(), item.local)
+    )
 
 
 def timestamp() -> str:
@@ -315,9 +324,7 @@ def parse_header_env(value: str) -> tuple[str, str]:
             "environment headers must look like 'Header-Name=ENV_VARIABLE'"
         )
     if variable.strip() not in os.environ:
-        raise argparse.ArgumentTypeError(
-            f"environment variable {variable.strip()!r} isn't set"
-        )
+        raise argparse.ArgumentTypeError(f"environment variable {variable.strip()!r} isn't set")
     return name.strip(), os.environ[variable.strip()]
 
 
@@ -443,7 +450,7 @@ class JsonlLog:
         self.path = path
         self._file = None
 
-    def __enter__(self) -> "JsonlLog":
+    def __enter__(self) -> JsonlLog:
         if self.path is not None:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             self._file = self.path.open("a", encoding="utf-8")
@@ -511,7 +518,7 @@ def render_message(
 async def wait_or_stop(stop: asyncio.Event, seconds: float) -> None:
     try:
         await asyncio.wait_for(stop.wait(), timeout=seconds)
-    except TimeoutError:
+    except asyncio.TimeoutError:  # alias of TimeoutError on 3.11+, distinct on 3.10
         pass
 
 
@@ -620,6 +627,24 @@ async def listen(
                 delay = min(delay * 2, args.retry_max)
 
 
+def resource_path(*parts: str) -> Path:
+    """Locate bundled files both from source and inside a PyInstaller build."""
+    base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parent))
+    return base.joinpath(*parts)
+
+
+def enable_windows_dpi_awareness() -> None:
+    """Render crisp text on high-DPI Windows displays instead of a blurry bitmap."""
+    if not sys.platform.startswith("win"):
+        return
+    try:
+        import ctypes
+
+        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+    except (AttributeError, OSError):
+        pass
+
+
 def run_gui(base_args: argparse.Namespace) -> int:
     """Run the listener and local socket finder in a compact Tk interface."""
     try:
@@ -642,9 +667,19 @@ def run_gui(base_args: argparse.Namespace) -> int:
             self.visible_candidates: dict[str, SocketCandidate] = {}
             self.more_visible = False
 
-            root.title("WebSocket Finder")
-            root.geometry("1000x760")
-            root.minsize(780, 600)
+            root.title(f"{APP_NAME} {__version__}")
+            # Tk reports pixels per point; 96 DPI equals 4/3. Scale the window with it.
+            scale = max(1.0, float(root.tk.call("tk", "scaling")) / (96 / 72))
+            root.geometry(f"{round(1000 * scale)}x{round(760 * scale)}")
+            root.minsize(round(780 * scale), round(600 * scale))
+            ttk.Style(root).configure("Treeview", rowheight=round(22 * scale))
+            icon = resource_path("assets", "icon.png")
+            if icon.is_file():
+                try:
+                    self.icon = tk.PhotoImage(file=str(icon))
+                    root.iconphoto(True, self.icon)
+                except tk.TclError:
+                    pass
 
             self.url = tk.StringVar(value=base_args.url)
             self.output_mode = tk.StringVar(value=base_args.output)
@@ -660,7 +695,9 @@ def run_gui(base_args: argparse.Namespace) -> int:
             self.subprotocols = tk.StringVar(value=", ".join(base_args.subprotocol))
             self.connection_status = tk.StringVar(value="Disconnected")
             self.socket_search = tk.StringVar()
-            self.find_status = tk.StringVar(value="Find local websocket listeners and active connections.")
+            self.find_status = tk.StringVar(
+                value="Find local websocket listeners and active connections."
+            )
 
             frame = ttk.Frame(root, padding=12)
             frame.grid(sticky="nsew")
@@ -682,7 +719,9 @@ def run_gui(base_args: argparse.Namespace) -> int:
 
             self.find_button = ttk.Button(frame, text="Find", command=self.find_sockets)
             self.find_button.grid(row=1, column=0, pady=(12, 6), sticky="w")
-            ttk.Label(frame, text="Search").grid(row=1, column=1, padx=(10, 6), pady=(12, 6), sticky="e")
+            ttk.Label(frame, text="Search").grid(
+                row=1, column=1, padx=(10, 6), pady=(12, 6), sticky="e"
+            )
             ttk.Entry(frame, textvariable=self.socket_search).grid(
                 row=1, column=2, columnspan=4, pady=(12, 6), sticky="ew"
             )
@@ -785,9 +824,7 @@ def run_gui(base_args: argparse.Namespace) -> int:
                 variable=self.insecure,
             ).grid(row=4, column=1, columnspan=2, pady=(8, 0), sticky="w")
 
-            ttk.Label(self.more, text="Send once").grid(
-                row=5, column=0, pady=(8, 0), sticky="nw"
-            )
+            ttk.Label(self.more, text="Send once").grid(row=5, column=0, pady=(8, 0), sticky="nw")
             self.startup_message = tk.Text(self.more, height=3, wrap="word")
             self.startup_message.grid(
                 row=5, column=1, columnspan=5, padx=(8, 0), pady=(8, 0), sticky="ew"
@@ -798,7 +835,9 @@ def run_gui(base_args: argparse.Namespace) -> int:
             output_bar = ttk.Frame(frame)
             output_bar.grid(row=6, column=0, columnspan=6, pady=(10, 4), sticky="new")
             output_bar.columnconfigure(0, weight=1)
-            ttk.Label(output_bar, textvariable=self.connection_status).grid(row=0, column=0, sticky="w")
+            ttk.Label(output_bar, textvariable=self.connection_status).grid(
+                row=0, column=0, sticky="w"
+            )
             ttk.Button(output_bar, text="Clear", command=self.clear).grid(row=0, column=1)
 
             self.output = scrolledtext.ScrolledText(frame, wrap="word", state="disabled")
@@ -811,6 +850,8 @@ def run_gui(base_args: argparse.Namespace) -> int:
             root.protocol("WM_DELETE_WINDOW", self.close)
             root.after(75, self.drain_events)
             root.after(250, self.find_sockets)
+            if getattr(base_args, "connect", False):
+                root.after(400, self.connect)
 
         @staticmethod
         def comma_list(value: str) -> list[str]:
@@ -896,7 +937,9 @@ def run_gui(base_args: argparse.Namespace) -> int:
             if selected_candidate is None:
                 self.socket_list.yview_moveto(0)
             if query:
-                self.find_status.set(f"{shown} of {len(self.candidates)} shown. Double-click to use an address.")
+                self.find_status.set(
+                    f"{shown} of {len(self.candidates)} shown. Double-click to use an address."
+                )
             else:
                 self.set_socket_summary()
 
@@ -919,13 +962,17 @@ def run_gui(base_args: argparse.Namespace) -> int:
             if not url and candidate.state == "Listening":
                 host, port = split_endpoint(candidate.local)
                 if port is not None:
-                    host = "127.0.0.1" if host in {"0.0.0.0", "*"} else "::1" if host == "::" else host
+                    host = (
+                        "127.0.0.1" if host in {"0.0.0.0", "*"} else "::1" if host == "::" else host
+                    )
                     url = f"ws://{display_endpoint(host, port)}"
             if url:
                 self.url.set(url)
                 self.connection_status.set("Address selected. Press Connect.")
             else:
-                self.connection_status.set("This active connection does not expose its websocket URL.")
+                self.connection_status.set(
+                    "This active connection does not expose its websocket URL."
+                )
 
         def connect(self) -> None:
             try:
@@ -1026,7 +1073,8 @@ def run_gui(base_args: argparse.Namespace) -> int:
                 self.worker_loop.call_soon_threadsafe(self.worker_stop.set)
             self.root.destroy()
 
-    root = tk.Tk()
+    enable_windows_dpi_awareness()
+    root = tk.Tk(className="WebSocketScanner")
     try:
         ttk.Style(root).theme_use("vista" if sys.platform.startswith("win") else "clam")
     except tk.TclError:
@@ -1038,9 +1086,11 @@ def run_gui(base_args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
+        prog="ws-scanner",
         description="Listen to a WebSocket and extract text from plain-text or JSON messages.",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
     parser.add_argument(
         "url",
         nargs="?",
@@ -1048,6 +1098,9 @@ def build_parser() -> argparse.ArgumentParser:
         help="ws:// or wss:// address (or set WS_URL)",
     )
     parser.add_argument("--gui", action="store_true", help="open the graphical listener")
+    parser.add_argument(
+        "--connect", action="store_true", help="with --gui, connect to the URL on launch"
+    )
     parser.add_argument(
         "--output",
         choices=("text", "json", "raw"),
@@ -1163,6 +1216,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     except KeyboardInterrupt:
         pass
     return 0
+
+
+def gui_main() -> int:
+    """Entry point for the ``ws-scanner-gui`` launcher."""
+    return main(["--gui", *sys.argv[1:]])
 
 
 if __name__ == "__main__":
